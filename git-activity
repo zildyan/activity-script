@@ -1,0 +1,197 @@
+#!/usr/bin/env bash
+
+usage() {
+	echo
+	echo "  Search in current directory for all git repositories and"
+	echo "  prints latest commit activity for authors across all"
+	echo "  available repositories and for all branches"
+	echo
+	echo "  Default behavior is: last three commits by every author"
+	echo "  found across repositories in last week without fetching"
+	echo 
+	echo "  Usage: git activity <--since=?> <--count=?> <--author=?> <--fetch>"
+	echo
+	echo "  Available options are:"
+	echo "      since   default is 1 week ago"
+	echo "      count   default is 3"
+	echo "      author  default is all"
+	echo "      fetch   default is false"
+	echo "      team    mislav, dino, nikola, ivan, kristian"
+	echo
+	echo "  Author: Dino Pavić"
+	echo "  Corvus@2016"
+}
+
+main() {
+	
+	if [[ $1 = help ]]; then
+		usage
+		exit 1
+	fi
+	
+	if [[ ! -z $1 ]] && [[ ! $1 = -?* ]]; then
+		printf "  Invalid option"
+		exit 1
+	fi
+
+	trap 'printf "\n  Operation failed\n"; exit 1' ERR;
+
+	DEFAULT_COUNT="3"
+	COUNT_OPTION="-$DEFAULT_COUNT"
+	COUNT_OPTION_ARG=$DEFAULT_COUNT
+	AUTHOR_OPTION=""
+	SINCE_OPTION="--since=1 week ago"
+	SINCE_OPTION_ARG="1 week ago"
+	FETCH_OPTION=""
+
+	while [[ $1 = -?* ]]; do
+		case $1 in
+			--count=?*)
+				COUNT_OPTION_ARG=$(echo $1 | cut -d'=' -f2)
+				if [[ -z "$COUNT_OPTION_ARG" ]]; then
+					printf "  Invalid option"
+					exit 1
+				elif [[ "$COUNT_OPTION_ARG" = "all" ]]; then
+					COUNT_OPTION=""
+				else
+					COUNT_OPTION="-$COUNT_OPTION_ARG"
+				fi
+			;;       
+			--since=?*)
+				SINCE_OPTION_ARG=$(echo $1 | cut -d'=' -f2)
+				if [[ -z "$SINCE_OPTION_ARG" ]]; then
+					printf "  Invalid option"
+					exit 1
+				elif [[ "$SINCE_OPTION_ARG" = "ever" ]]; then
+					SINCE_OPTION=""
+				else
+					SINCE_OPTION=$1
+				fi
+				SINCE_OPTION_ARG=$(echo $SINCE_OPTION_ARG | sed -e 's:\.: :g')
+			;;  
+			--author=?*)
+				AUTHOR_OPTION=$(echo $1 | cut -d'=' -f2)
+				if [[ -z "$AUTHOR_OPTION" ]]; then
+					printf "  Invalid option"
+					exit 1
+				fi
+			;; 
+			--team)
+				AUTHOR_OPTION="dino.pavic,nikola.masic,kristian.markulin,mislav.stankovic,ivan.belfinger"
+			;;
+			-f|--fetch)
+				FETCH_OPTION="TRUE"           
+			;;	
+			*)  
+				printf "  Invalid option\n"
+				exit 1
+			;;
+			esac
+		shift
+	done
+
+	printf "  Searching for git repositories in current directory...\n"
+
+	repos=( $(timeout 5 find ${PWD} \( -exec test -d {}/.git \; \) -print -prune 2>&1 | grep -v 'Permission denied' | grep -o '[^/]*$' ) )
+	
+	declare -A all_commits
+		
+	if [ ! ${#repos[@]} -eq 0 ]; then
+		printf "\n"
+		printf "  Repositories found:\n"
+		
+		for repo in "${repos[@]}"; do
+			
+			printf "      $(tput bold)$(tput setaf 6)$repo$(tput sgr0)\n"
+			
+			if [[ ! ${#repos[@]} -eq 1 ]]; then
+				cd $repo
+			fi
+			
+			repo_format=$(echo "$(tput setaf 6)(${repo})")
+			
+			if [[ ! -z $FETCH_OPTION ]]; then		
+				printf "      Fetching...\n"			
+				git fetch --all --quiet
+				
+				if [[ ! $? -eq 0 ]]; then		
+					printf "      $fetch_output\n"
+					printf "\n"
+					printf "      Error happend - informations can be outdated\n"
+				fi
+			fi
+			
+			if [[ -z $AUTHOR_OPTION ]]; then
+				IFS=$' '
+				authors=$(git log --all --format='%ae' | sort -u)			
+
+				for author in $authors; do
+					formated_authors+=($(echo $author | cut -d '@' -f 1))
+				done
+
+				unique_authors=$(echo "${formated_authors[@]}" | tr ' ' '\n' | sort -u | tr '\n' ' ')
+			else
+				IFS=$','
+				unique_authors=($AUTHOR_OPTION)
+			fi
+			
+			for author in ${unique_authors[@]}; do	
+				author_commits=()
+				IFS=$'\n'
+				
+				author_commits_arr=$(git log --all --author=$author --pretty=format:'%ct*  %C(Yellow)%h%Creset %C(green)%ad ~ %ar%Creset %s%n' --date=format:'%Y-%d-%m @ %H:%M' $SINCE_OPTION $COUNT_OPTION)		
+					
+				if [ -z "${author_commits_arr[@]}" ]; then
+					continue
+				fi
+				
+				for commit in ${author_commits_arr[@]}; do	
+					author_commits=("$author_commits$commit $repo_format;")			
+				done
+				
+				if [[ -z ${all_commits[$author]} ]]; then
+					all_commits[$author]=$author_commits
+				else
+					all_commits[$author]="${all_commits[$author]}$author_commits"
+				fi
+			done 
+			
+			cd ..
+		done
+	else
+		echo "  Nothing found!"
+		exit 1
+	fi
+
+	if [ ! ${#all_commits[@]} -eq 0 ]; then
+	
+		printf "\n  Showing last $COUNT_OPTION_ARG commits since $SINCE_OPTION_ARG:\n"
+		printf "\n"
+		
+		for author in "${!all_commits[@]}"; do 	
+			IFS=';'
+			author_commits_arr=(${all_commits[$author]})
+			
+			if [[ ! -z ${author_commits_arr[@]} ]]; then				
+				author_commits_sorted=( $(
+					for commit in "${author_commits_arr[@]}"; do
+						echo "$commit"
+					done | sort -k1.1,1.10r  | cut -d'*' -f2 
+				))
+				
+				IFS=$'\n'
+				author_commits_output=($author_commits_sorted)
+				
+				printf "$(tput bold)$(tput setaf 1)  --- $author ---$(tput sgr0)\n"
+				for commit in "${author_commits_output[@]:0:$COUNT_OPTION_ARG}"; do
+					echo $commit
+				done
+				
+				printf "\n"
+			fi	
+		done
+	else
+		printf "\n  There is no commits...\n"
+	fi
+}
+main "$@"
